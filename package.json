@@ -1,0 +1,13 @@
+{
+  "name": "graphiti-group-proxy",
+  "version": "1.0.0",
+  "description": "Thin MCP proxy that injects group_id into Graphiti tool calls based on URL path",
+  "type": "module",
+  "main": "proxy.mjs",
+  "scripts": {
+    "start": "node proxy.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
