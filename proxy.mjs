@@ -1,8 +1,28 @@
 import http from 'node:http';
+import crypto from 'node:crypto';
 
 const UPSTREAM = (process.env.GRAPHITI_URL || 'https://graphiti.h0p.cc').replace(/\/$/, '');
 const PORT = parseInt(process.env.PORT || '8000', 10);
 const LOG = process.env.LOG !== '0'; // logging on by default, LOG=0 to disable
+const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
+
+// Timing-safe bearer token check
+function checkAuth(req) {
+  if (!AUTH_TOKEN) {
+    // No token configured — fail closed, reject everything
+    console.error('[auth] AUTH_TOKEN not set — rejecting request');
+    return false;
+  }
+  const header = req.headers['authorization'] || '';
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return false;
+  const provided = match[1];
+  if (provided.length !== AUTH_TOKEN.length) return false;
+  return crypto.timingSafeEqual(
+    Buffer.from(provided, 'utf8'),
+    Buffer.from(AUTH_TOKEN, 'utf8'),
+  );
+}
 
 // Tools that take group_id (singular, string)
 const GROUP_ID_TOOLS = new Set([
@@ -146,23 +166,29 @@ async function forward(req, res, group) {
   }
 }
 
+function reject(res, status, error, detail) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error, detail }));
+}
+
 const server = http.createServer((req, res) => {
   const path = req.url.split('?')[0];
 
-  // Health check
+  // Health check — no auth required (Coolify / load balancers need this)
   if (path === '/health' || path === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'healthy', service: 'graphiti-group-proxy', upstream: UPSTREAM }));
     return;
   }
 
-  // Bare /mcp — pass through without group injection (for direct access / testing)
-  if (path === '/mcp' || path === '/mcp/') {
-    forward(req, res, null);
+  // All other routes require bearer token auth
+  if (!checkAuth(req)) {
+    if (LOG) console.log(`[auth] rejected ${req.method} ${req.url}`);
+    reject(res, 401, 'unauthorized', 'Valid Bearer token required');
     return;
   }
 
-  // /mcp/{group} or /{group}/mcp
+  // /mcp/{group} or /{group}/mcp — group-scoped proxy
   const group = extractGroup(req.url);
   if (group) {
     if (LOG) console.log(`[route] ${req.method} ${req.url} → group="${group}"`);
@@ -170,16 +196,13 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Unknown route
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    error: 'not_found',
-    usage: 'POST /mcp/{group_id} — group-scoped MCP proxy  |  POST /mcp — direct passthrough  |  GET /health',
-  }));
+  // No bare /mcp — every request must be group-scoped
+  reject(res, 404, 'not_found', 'Use /mcp/{group_id} for group-scoped access. Bare /mcp is disabled.');
 });
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`graphiti-group-proxy listening on :${PORT}`);
   console.log(`upstream: ${UPSTREAM}/mcp`);
-  console.log(`routes: /mcp/{group} | /{group}/mcp | /mcp (passthrough) | /health`);
+  console.log(`auth: ${AUTH_TOKEN ? 'enabled (bearer token)' : 'DISABLED — AUTH_TOKEN not set, all requests rejected'}`);
+  console.log(`routes: /mcp/{group} | /{group}/mcp | /health`);
 });
