@@ -2,6 +2,7 @@ import http from 'node:http';
 
 const UPSTREAM = (process.env.GRAPHITI_URL || 'https://graphiti.h0p.cc').replace(/\/$/, '');
 const PORT = parseInt(process.env.PORT || '8000', 10);
+const LOG = process.env.LOG !== '0'; // logging on by default, LOG=0 to disable
 
 // Tools that take group_id (singular, string)
 const GROUP_ID_TOOLS = new Set([
@@ -16,6 +17,14 @@ const GROUP_IDS_TOOLS = new Set([
   'clear_graph', 'get_episodes',
 ]);
 
+// Tools with NO group parameter — pass through untouched
+const NO_GROUP_TOOLS = new Set(['get_status']);
+
+// Normalize tool name: Paperclip may send hyphens instead of underscores
+function normalizeTool(name) {
+  return name ? name.replace(/-/g, '_') : name;
+}
+
 // Extract group slug from /mcp/{slug} or /{slug}/mcp
 function extractGroup(url) {
   const path = url.split('?')[0];
@@ -26,25 +35,51 @@ function extractGroup(url) {
   return null;
 }
 
-// Inject group into tools/call arguments
+// Scrub and inject group into tools/call arguments
 function injectGroup(body, group) {
   if (body?.method !== 'tools/call') return body;
-  const tool = body.params?.name;
-  if (!tool) return body;
 
+  const rawTool = body.params?.name;
+  if (!rawTool) return body;
+  const tool = normalizeTool(rawTool);
+
+  // No group param for this tool
+  if (NO_GROUP_TOOLS.has(tool)) return body;
+
+  // Start from current args, scrub ALL group-related params first
   const args = { ...(body.params.arguments || {}) };
+  delete args.group_id;
+  delete args.group_ids;
 
+  // Inject the correct parameter for this tool
   if (GROUP_ID_TOOLS.has(tool)) {
     args.group_id = group;
   } else if (GROUP_IDS_TOOLS.has(tool)) {
     args.group_ids = group;
+  } else {
+    // Unknown tool — inject BOTH to be safe (Graphiti ignores extra params)
+    args.group_id = group;
+    args.group_ids = group;
   }
-  // Tools with no group param (e.g. get_status) pass through untouched
+
+  if (LOG) {
+    const action = GROUP_ID_TOOLS.has(tool) ? 'group_id' :
+                   GROUP_IDS_TOOLS.has(tool) ? 'group_ids' : 'both';
+    console.log(`[inject] ${rawTool} → ${action}="${group}"`);
+  }
 
   return {
     ...body,
     params: { ...body.params, arguments: args },
   };
+}
+
+// Handle both single JSON-RPC objects and batched arrays
+function processBody(body, group) {
+  if (Array.isArray(body)) {
+    return body.map(item => injectGroup(item, group));
+  }
+  return injectGroup(body, group);
 }
 
 async function forward(req, res, group) {
@@ -65,7 +100,7 @@ async function forward(req, res, group) {
   if (req.method === 'POST' && rawBody && group) {
     try {
       let parsed = JSON.parse(rawBody);
-      parsed = injectGroup(parsed, group);
+      parsed = processBody(parsed, group);
       upstreamBody = JSON.stringify(parsed);
     } catch {
       // Not valid JSON — forward as-is
@@ -128,6 +163,7 @@ const server = http.createServer((req, res) => {
   // /mcp/{group} or /{group}/mcp
   const group = extractGroup(req.url);
   if (group) {
+    if (LOG) console.log(`[route] ${req.method} ${req.url} → group="${group}"`);
     forward(req, res, group);
     return;
   }
