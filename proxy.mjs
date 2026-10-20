@@ -52,14 +52,16 @@ function injectGroup(body, group) {
   delete args.group_ids;
 
   // Inject the correct parameter for this tool
+  // group_ids is always injected as an array — some tools (get_episodes)
+  // require array form and silently return empty on a bare string
   if (GROUP_ID_TOOLS.has(tool)) {
     args.group_id = group;
   } else if (GROUP_IDS_TOOLS.has(tool)) {
-    args.group_ids = group;
+    args.group_ids = [group];
   } else {
     // Unknown tool — inject BOTH to be safe (Graphiti ignores extra params)
     args.group_id = group;
-    args.group_ids = group;
+    args.group_ids = [group];
   }
 
   if (LOG) {
