@@ -70,7 +70,7 @@ function injectGroup(body, group) {
 
   return {
     ...body,
-    params: { ...body.params, arguments: args },
+    params: { ...body.params, name: tool, arguments: args },
   };
 }
 
